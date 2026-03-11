@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
 import numpy as np
 
 # --- 1. CONFIGURAZIONE PAGINA ---
@@ -15,7 +13,7 @@ def map_ticker(row):
     sym = str(row['Simbolo']).strip()
     if pd.isna(sym) or sym == 'nan': return None
     
-    # Override per ETF/Titoli specifici (basato sull'analisi del tuo portafoglio)
+    # Override per ETF/Titoli specifici (basato sul tuo CSV)
     overrides = {
         'MGT.MI': 'MGT.PA', 'OR.EQ': 'OR.PA', 'AHLA.EQ': 'AHLA.F', 'LCOP.MI': 'LCOP.L',
         'EMOVE.MI': 'ECAR.L', 'EURO.MI': 'SMEU.MI', 'HSTE.MI': '3033.HK', 'CHINA.MI': 'CC1.PA',
@@ -23,7 +21,8 @@ def map_ticker(row):
         'REMX.MI': 'REMX', 'DAPP.MI': 'DAPP', '1NVDA.MI': 'NVDA', '1MU.MI': 'MU',
         '1GOOGL.MI': 'GOOGL', '1CALM.MI': 'CALM', '1AVGO.MI': 'AVGO', '1FDS.MI': 'FDS',
         'PHPD.MI': 'PHPD.MI', 'VBTC.FRA': 'VBTC.DE', 'VS0L.FRA': 'VS0L.DE', '2BTC.FRA':'2BTC.DE',
-        'WETH.FRA': 'WETH.DE', 'VETH.FRA': 'VETH.DE', 'NOV.FRA':'NOV.F', '4COP.FRA':'4COP.DE'
+        'WETH.FRA': 'WETH.DE', 'VETH.FRA': 'VETH.DE', 'NOV.FRA':'NOV.F', '4COP.FRA':'4COP.DE',
+        'GBSE.MI':'GBSE.MI', 'RACE.MI':'RACE.MI', 'CE.MI':'CE.MI'
     }
     if sym in overrides: return overrides[sym]
     
@@ -83,12 +82,15 @@ if uploaded_file is not None:
     tickers = df['Yahoo_Ticker'].dropna().unique().tolist()
 
     with st.spinner("Sincronizzazione prezzi storici (1 Anno) da Yahoo Finance in corso..."):
-        # 2. SCARICAMENTO STORICO (Ultimo anno per calcolare i grafici)
+        # 2. SCARICAMENTO STORICO CON FIX PANDAS SERIES
         hist_data = yf.download(tickers, period="1y", group_by='ticker')
         
-        # Scarico valute semplificato per conversione
-        fx_usd = yf.download("EUR=X", period="1d")['Close'].iloc[-1] # Tasso USD/EUR
-        
+        fx_data = yf.download("EUR=X", period="1d")['Close']
+        if isinstance(fx_data, pd.DataFrame):
+            fx_usd = float(fx_data.iloc[-1, 0])
+        else:
+            fx_usd = float(fx_data.iloc[-1])
+            
     st.success("Dati aggiornati con successo!")
 
     # 3. ELABORAZIONE STATISTICHE MULTI-PERIODO
@@ -96,11 +98,10 @@ if uploaded_file is not None:
     
     for _, row in df.iterrows():
         t = row['Yahoo_Ticker']
-        qty = row['Quantita']
+        qty = float(row['Quantita'])
         if pd.isna(t) or t not in hist_data: continue
         
         try:
-            # Estrazione serie storica dei prezzi per il ticker
             if len(tickers) == 1:
                 t_hist = hist_data['Close'].dropna()
             else:
@@ -108,25 +109,21 @@ if uploaded_file is not None:
                 
             if t_hist.empty: continue
             
-            # Prezzi in istanti temporali diversi
-            p_now = t_hist.iloc[-1]
-            p_1m = t_hist.iloc[-21] if len(t_hist) > 21 else t_hist.iloc[0] # ~21 gg lavorativi in 1 mese
-            p_3m = t_hist.iloc[-63] if len(t_hist) > 63 else t_hist.iloc[0] # ~63 gg lavorativi in 3 mesi
-            p_6m = t_hist.iloc[-126] if len(t_hist) > 126 else t_hist.iloc[0]
-            p_1y = t_hist.iloc[0]
+            # FORZATURA DEI PREZZI A FLOAT (Risolve l'errore di formattazione)
+            p_now = float(np.atleast_1d(t_hist.iloc[-1])[0])
+            p_1m = float(np.atleast_1d(t_hist.iloc[-21] if len(t_hist) > 21 else t_hist.iloc[0])[0])
+            p_3m = float(np.atleast_1d(t_hist.iloc[-63] if len(t_hist) > 63 else t_hist.iloc[0])[0])
+            p_6m = float(np.atleast_1d(t_hist.iloc[-126] if len(t_hist) > 126 else t_hist.iloc[0])[0])
+            p_1y = float(np.atleast_1d(t_hist.iloc[0])[0])
             
-            # Gestione valuta (Semplificata: EUR se ha estensione eu, altrimenti USD. GBP/HKD tollerati per calcoli approssimativi)
             is_eur = any(x in t for x in ['.MI', '.F', '.DE', '.PA', '.MC', '.AS'])
             fx_multiplier = 1.0 if is_eur else (1 / fx_usd)
             
-            # Calcolo Valore Attuale EUR
-            valore_eur = qty * p_now * fx_multiplier
-            
-            # P&L Assoluto in EUR per i diversi periodi
-            pl_1m = qty * (p_now - p_1m) * fx_multiplier
-            pl_3m = qty * (p_now - p_3m) * fx_multiplier
-            pl_6m = qty * (p_now - p_6m) * fx_multiplier
-            pl_1y = qty * (p_now - p_1y) * fx_multiplier
+            valore_eur = float(qty * p_now * fx_multiplier)
+            pl_1m = float(qty * (p_now - p_1m) * fx_multiplier)
+            pl_3m = float(qty * (p_now - p_3m) * fx_multiplier)
+            pl_6m = float(qty * (p_now - p_6m) * fx_multiplier)
+            pl_1y = float(qty * (p_now - p_1y) * fx_multiplier)
             
             results.append({
                 'Titolo': row['Titolo'],
@@ -172,7 +169,6 @@ if uploaded_file is not None:
             st.plotly_chart(fig2, use_container_width=True)
 
         st.markdown("#### 🗺️ Mappa ad Albero (Rischio e Asset Allocation)")
-        # Treemap per vedere il peso sul totale (dimensione) e la performance a 1 anno (colore)
         fig_tree = px.treemap(df_res, path=['Mercato', 'Titolo'], values='Valore Totale (€)',
                               color='P&L 1 Anno (€)', color_continuous_scale='RdYlGn',
                               color_continuous_midpoint=0)
