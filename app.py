@@ -3,225 +3,255 @@ import pandas as pd
 import yfinance as yf
 import plotly.express as px
 import numpy as np
-import os
 
-st.set_page_config(page_title="Gestione Portafoglio Avanzata", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Portfolio Ledger Analytics", layout="wide", page_icon="📚")
 
-# --- 1. FUNZIONI DI SUPPORTO E MAPPING ---
-def map_ticker(row):
-    """Mappa i codici del CSV a Yahoo Finance"""
-    sym = str(row['Simbolo']).strip()
-    if pd.isna(sym) or sym == 'nan': return None
-    
-    overrides = {
-        'MGT.MI': 'MGT.PA', 'OR.EQ': 'OR.PA', 'AHLA.EQ': 'AHLA.F', 'LCOP.MI': 'LCOP.L',
-        'EMOVE.MI': 'ECAR.L', 'EURO.MI': 'SMEU.DE', 'HSTE.MI': '3033.HK', 'CHINA.MI': 'CC1.PA',
-        '1EL.MI': 'EL.PA', '1ITX.MI': 'ITX.MC', 'BRK/B.N': 'BRK-B', 'OXY/WS.N': 'OXY',
-        'REMX.MI': 'VVMX.DE', 'DAPP.MI': 'DAPP', '1NVDA.MI': 'NVDA', '1MU.MI': 'MU',
-        '1GOOGL.MI': 'GOOGL', '1CALM.MI': 'CALM', '1AVGO.MI': 'AVGO', '1FDS.MI': 'FDS',
-        'PHPD.MI': 'PHPD.MI', 'VBTC.FRA': 'VBTC.DE', 'VS0L.FRA': 'VS0L.DE', '2BTC.FRA':'2BTC.DE',
-        'WETH.FRA': 'WETH.DE', 'VETH.FRA': 'VETH.DE', 'NOV.FRA':'NOV.F', '4COP.FRA':'4COP.DE',
-        'GBSE.MI':'GBSE.MI', 'RACE.MI':'RACE.MI', 'CE.MI':'CE.MI', 'OXY.N': 'OXY', 'TSM.N': 'TSM',
-        'RARE.MI': 'RARE.L', 'AAPL.O': 'AAPL', 'WFC.N': 'WFC', 'FLNC.O': 'FLNC', 'SEI.N': 'SEI',
-        'CWEN.N': 'CWEN', 'IBM.N': 'IBM', 'DLO.O': 'DLO', 'SNDK.O': 'SNDK', 'BEPC.N': 'BEPC', 'INR.N': 'INR'
-    }
-    if sym in overrides: return overrides[sym]
-    
-    if 'CFD' in sym:
-        clean = sym.replace('.CFD', '').replace('CFD', '')
-        return 'RACE.MI' if clean == 'RACE' else clean
-    
-    if sym.endswith('.O') or sym.endswith('.N') or sym.endswith('.OQ'): return sym.split('.')[0]
-    if sym.endswith('.FRA'): return f"{sym.split('.')[0]}.DE"
-    
-    return sym
+# --- 1. MAPPATURA ISIN -> TICKER YAHOO ---
+ISIN_TO_TICKER = {
+    'US67066G1040': 'NVDA',
+    'US5951121038': 'MU',
+    'IT0003121677': 'CE.MI',
+    'US8740391003': 'TSM',
+    'US6745991058': 'OXY',
+    'US0378331005': 'AAPL',
+    'US9497461015': 'WFC',
+    'US4592001014': 'IBM',
+    'FR0000120321': 'OR.PA',
+    'NL00150001Q9': 'RACE.MI',
+    'FR0007075494': 'MGT.PA',
+    'JE00B1VS3002': 'PHPD.MI',
+    'DE000A28M8D0': 'VBTC.DE',
+    'DE000A3GSUD3': 'VS0L.DE',
+    'CH0454664001': '2BTC.DE',
+    'GB00BJYDH394': 'WETH.DE',
+    'DE000A3GPSP7': 'VETH.DE',
+    'IE0002PG6CA6': 'VVMX.DE', 
+    'JE00BDD9QD91': 'LCOP.L',
+    'IE0000ZL1RD2': 'SMH',
+    'US7427181091': 'PG',
+    'IT0005252207': 'CPR.MI',
+    'US1280302027': 'CALM'
+}
 
-def pulisci_dati(df):
-    """Pulisce il CSV ed estrae i valori esatti calcolati dalla Banca"""
-    cols = df.columns.tolist()
-    new_cols = []
-    for c in cols:
-        if 'Quantit' in c: new_cols.append('Quantita')
-        elif 'P.zo medio di carico' in c: new_cols.append('Prezzo_Carico_CSV')
-        elif 'Valore di carico' in c: new_cols.append('Valore_Carico_CSV')
-        elif 'P.zo di mercato' in c: new_cols.append('Prezzo_Mercato_CSV')
-        elif 'Valore di mercato' in c: new_cols.append('Valore_Mercato_CSV')
-        elif 'Var%' in c: new_cols.append('Var_Perc_CSV')
-        elif 'Var' in c and 'valuta' not in c and '%' not in c: new_cols.append('Var_EUR_CSV')
-        else: new_cols.append(c)
-    df.columns = new_cols
+def map_isin_to_ticker(isin, titolo):
+    if pd.isna(isin) or str(isin).strip() == '':
+        titolo_upper = str(titolo).upper()
+        if 'NEXTERA' in titolo_upper: return 'NEE'
+        if 'NU RG-A' in titolo_upper: return 'NU'
+        if 'BIOGEN' in titolo_upper: return 'BIIB'
+        if 'UIPATH' in titolo_upper: return 'PATH'
+        return None
+    return ISIN_TO_TICKER.get(str(isin).strip(), None)
 
-    def to_float(val):
-        if pd.isna(val): return 0.0
-        if isinstance(val, (int, float)): return float(val)
-        try: return float(str(val).replace('.', '').replace(',', '.'))
-        except: return 0.0
+# --- 2. ELABORAZIONE DATI ---
+def pulisci_numeri(val):
+    if pd.isna(val) or str(val).strip() == '': return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    try: return float(str(val).replace('.', '').replace(',', '.'))
+    except: return 0.0
 
-    num_cols = ['Quantita', 'Prezzo_Carico_CSV', 'Valore_Carico_CSV', 'Prezzo_Mercato_CSV', 'Valore_Mercato_CSV', 'Var_EUR_CSV']
-    for col in num_cols:
+@st.cache_data
+def elabora_transazioni(df_raw):
+    df = df_raw.copy()
+    colonne_num = ['Quantita', 'Prezzo', 'Cambio', 'Controvalore', 'Commissioni amministrato']
+    for col in colonne_num:
         if col in df.columns:
-            df[col] = df[col].apply(to_float)
+            df[col] = df[col].apply(pulisci_numeri)
             
-    return df[df['Quantita'] > 0].copy()
+    df['Operazione'] = pd.to_datetime(df['Operazione'], format='%d/%m/%Y', errors='coerce')
+    df = df.dropna(subset=['Operazione'])
+    df = df.sort_values('Operazione').reset_index(drop=True)
+    return df
 
-# Caching dello storico per evitare i blocchi di Yahoo
-@st.cache_data(ttl=3600)
-def fetch_historical_data(tickers):
-    hist_data = yf.download(tickers, period="5y", group_by='ticker')
-    fx_data = yf.download("EUR=X", period="1d")['Close']
-    fx_usd = float(fx_data.iloc[-1, 0]) if isinstance(fx_data, pd.DataFrame) else float(fx_data.iloc[-1])
-    return hist_data, fx_usd
-
-# --- 2. GESTIONE DELLA MEMORIA (BASELINE) ---
-BASELINE_FILE = "baseline_portfolio.csv"
-
-# Sidebar per il caricamento
-with st.sidebar:
-    st.header("📂 Gestione Dati")
-    uploaded_file = st.file_uploader("Carica il Portafoglio (CSV della Banca)", type=['csv'])
-    
-    if uploaded_file is not None:
-        raw_df = pd.read_csv(uploaded_file, sep=';', encoding='latin1')
-        df_clean = pulisci_dati(raw_df)
-        df_clean['Yahoo_Ticker'] = df_clean.apply(map_ticker, axis=1)
-        # Salva la baseline in memoria locale!
-        df_clean.to_csv(BASELINE_FILE, index=False)
-        st.success("✅ Portafoglio memorizzato con successo come nuova Base!")
-
-# Carica i dati dalla memoria se esistono
-if os.path.exists(BASELINE_FILE):
-    df = pd.read_csv(BASELINE_FILE)
-    
-    st.title("💼 Dashboard Portafoglio (Storico & Live)")
-    
-    tickers = df['Yahoo_Ticker'].dropna().unique().tolist()
-
-    with st.spinner("Scaricamento storico completo (5 Anni) da Yahoo Finance..."):
-        try:
-            hist_data, fx_usd = fetch_historical_data(tickers)
-            api_success = True
-        except Exception as e:
-            st.error("Errore di connessione a Yahoo Finance. Riprova tra poco.")
-            api_success = False
-
-    if api_success:
-        results = []
+# --- 3. MOTORE CONTABILE ---
+def calcola_ledger(df):
+    posizioni = {}
+    for _, row in df.iterrows():
+        isin = row['Isin']
+        titolo = row['Titolo']
+        chiave = str(isin).strip() if pd.notna(isin) and str(isin).strip() != '' else str(titolo).strip()
         
-        # Totali esatti derivanti dal file della Banca (Il tuo punto zero)
-        tot_valore_carico_banca = df['Valore_Carico_CSV'].sum()
+        if chiave not in posizioni:
+            posizioni[chiave] = {
+                'Titolo': titolo,
+                'ISIN': isin if pd.notna(isin) else "",
+                'Quantita_Attuale': 0.0,
+                'Valore_Carico_Totale': 0.0,
+                'Dividendi_Incassati': 0.0,
+                'Commissioni_Totali': 0.0,
+                'PL_Realizzato': 0.0
+            }
+            
+        pos = posizioni[chiave]
+        desc = str(row['Descrizione']).upper()
+        segno = str(row['Segno']).strip().upper()
+        controvalore = row['Controvalore']
+        qty = row['Quantita']
+        comm = row.get('Commissioni amministrato', 0.0)
         
-        for _, row in df.iterrows():
-            t = row['Yahoo_Ticker']
-            qty = float(row['Quantita'])
-            valore_carico_asset = float(row.get('Valore_Carico_CSV', 0.0))
-            valore_mercato_csv = float(row.get('Valore_Mercato_CSV', 0.0))
+        pos['Commissioni_Totali'] += comm
+        
+        if 'DIVIDENDO' in desc:
+            pos['Dividendi_Incassati'] += controvalore
             
-            if pd.isna(t) or qty == 0: continue
-            
-            try:
-                # Estrazione serie storica per il ticker
-                if len(tickers) == 1:
-                    t_hist = hist_data['Close'].dropna()
+        elif 'COMPRAVENDITA' in desc:
+            if segno == 'A':
+                pos['Quantita_Attuale'] += qty
+                pos['Valore_Carico_Totale'] += controvalore
+            elif segno == 'V':
+                if pos['Quantita_Attuale'] > 0:
+                    pmc = pos['Valore_Carico_Totale'] / pos['Quantita_Attuale']
+                    costo_del_venduto = pmc * qty
+                    profitto = controvalore - costo_del_venduto
+                    pos['PL_Realizzato'] += profitto
+                    pos['Quantita_Attuale'] -= qty
+                    pos['Valore_Carico_Totale'] -= costo_del_venduto
                 else:
-                    if t not in hist_data.columns.levels[0]: continue
-                    t_hist = hist_data[t]['Close'].dropna()
+                    pos['PL_Realizzato'] += controvalore
                     
-                if t_hist.empty: continue
+    risultati = []
+    for k, v in posizioni.items():
+        qty_att = round(v['Quantita_Attuale'], 4)
+        risultati.append({
+            'Chiave': k,
+            'Titolo': v['Titolo'],
+            'ISIN': v['ISIN'],
+            'Quantita Attuale': qty_att,
+            'Valore di Carico (€)': v['Valore_Carico_Totale'] if qty_att > 0.0001 else 0.0,
+            'P&L Realizzato Storico (€)': v['PL_Realizzato'],
+            'Dividendi Incassati (€)': v['Dividendi_Incassati'],
+            'Commissioni Totali (€)': v['Commissioni_Totali']
+        })
+    return pd.DataFrame(risultati)
+
+# --- 4. INTERFACCIA STREAMLIT ---
+st.title("📚 Storico Transazioni & Analisi P&L")
+st.markdown("Analisi completa del portafoglio: include le performance dei titoli attivi e di quelli già liquidati.")
+
+uploaded_file = st.sidebar.file_uploader("Carica il file transazioni.CSV", type=['csv'])
+
+if uploaded_file:
+    df_raw = pd.read_csv(uploaded_file, sep=';', encoding='latin1')
+    df_transazioni = elabora_transazioni(df_raw)
+    
+    st.sidebar.success(f"✅ {len(df_transazioni)} transazioni elaborate.")
+    
+    df_posizioni = calcola_ledger(df_transazioni)
+    df_posizioni['Ticker'] = df_posizioni.apply(lambda x: map_isin_to_ticker(x['ISIN'], x['Titolo']), axis=1)
+    
+    tickers_da_cercare = df_posizioni[(df_posizioni['Quantita Attuale'] > 0) & (df_posizioni['Ticker'].notna())]['Ticker'].unique().tolist()
+    
+    with st.spinner("Scaricamento prezzi Live..."):
+        try:
+            live_data = yf.download(tickers_da_cercare, period="1d", group_by='ticker')
+            fx_usd = float(yf.download("EUR=X", period="1d")['Close'].iloc[-1])
+        except:
+            live_data = None
+            fx_usd = 1.08
+            
+    valori_mercato = []
+    pl_latenti = []
+    
+    for _, row in df_posizioni.iterrows():
+        qty = row['Quantita Attuale']
+        t = row['Ticker']
+        val_carico = row['Valore di Carico (€)']
+        
+        if qty > 0.0001 and live_data is not None and pd.notna(t) and t in live_data:
+            try:
+                if len(tickers_da_cercare) == 1:
+                    p_now = float(np.atleast_1d(live_data['Close'].iloc[-1])[0])
+                else:
+                    p_now = float(np.atleast_1d(live_data[t]['Close'].iloc[-1])[0])
                 
-                # Prezzi nei vari intervalli temporali
-                p_now = float(np.atleast_1d(t_hist.iloc[-1])[0])
-                p_1d  = float(np.atleast_1d(t_hist.iloc[-2] if len(t_hist) > 2 else t_hist.iloc[0])[0])
-                p_5d  = float(np.atleast_1d(t_hist.iloc[-6] if len(t_hist) > 6 else t_hist.iloc[0])[0])
-                p_1m  = float(np.atleast_1d(t_hist.iloc[-22] if len(t_hist) > 22 else t_hist.iloc[0])[0])
-                p_3m  = float(np.atleast_1d(t_hist.iloc[-64] if len(t_hist) > 64 else t_hist.iloc[0])[0])
-                p_6m  = float(np.atleast_1d(t_hist.iloc[-126] if len(t_hist) > 126 else t_hist.iloc[0])[0])
-                p_1y  = float(np.atleast_1d(t_hist.iloc[-252] if len(t_hist) > 252 else t_hist.iloc[0])[0])
-                p_5y  = float(np.atleast_1d(t_hist.iloc[0])[0])
-                
-                # Conversione Valuta (Semplificata: converte in EUR se è un mercato extra-UE)
-                is_eur = any(x in t for x in ['.MI', '.F', '.DE', '.PA', '.MC', '.AS'])
+                is_eur = any(x in t for x in ['.MI', '.PA', '.DE', '.F', '.MC', '.AS'])
                 fx = 1.0 if is_eur else (1 / fx_usd)
                 
-                # Valore Attuale Calcolato
-                valore_attuale_live = qty * p_now * fx
-                
-                # Variazioni su base storica (P&L per periodi)
-                pl_1d = qty * (p_now - p_1d) * fx
-                pl_5d = qty * (p_now - p_5d) * fx
-                pl_1m = qty * (p_now - p_1m) * fx
-                pl_3m = qty * (p_now - p_3m) * fx
-                pl_6m = qty * (p_now - p_6m) * fx
-                pl_1y = qty * (p_now - p_1y) * fx
-                pl_5y = qty * (p_now - p_5y) * fx
-                
-                # P&L TOTALE ESATTO = Valore Attuale Live - Valore di Carico originale della Banca!
-                pl_totale = valore_attuale_live - valore_carico_asset
-                
-                results.append({
-                    'Titolo': row['Titolo'],
-                    'Ticker': t,
-                    'Valore Carico (€)': valore_carico_asset,
-                    'Valore Attuale (€)': valore_attuale_live,
-                    'P&L Totale (€)': pl_totale,
-                    '1 Giorno (€)': pl_1d,
-                    '5 Giorni (€)': pl_5d,
-                    '1 Mese (€)': pl_1m,
-                    '3 Mesi (€)': pl_3m,
-                    '6 Mesi (€)': pl_6m,
-                    '1 Anno (€)': pl_1y,
-                    '5 Anni (€)': pl_5y,
-                })
-            except Exception as e:
-                continue
-                
-        df_res = pd.DataFrame(results)
+                v_mercato = qty * p_now * fx
+                pl_latente = v_mercato - val_carico
+            except:
+                v_mercato = val_carico
+                pl_latente = 0.0
+        else:
+            v_mercato = 0.0 if qty <= 0.0001 else val_carico
+            pl_latente = 0.0
+            
+        valori_mercato.append(v_mercato)
+        pl_latenti.append(pl_latente)
         
-        if not df_res.empty:
-            st.markdown("### 🎯 KPI di Portafoglio")
-            
-            tot_attuale = df_res['Valore Attuale (€)'].sum()
-            tot_pl = df_res['P&L Totale (€)'].sum()
-            tot_pl_1d = df_res['1 Giorno (€)'].sum()
-            tot_pl_1m = df_res['1 Mese (€)'].sum()
-            tot_pl_1y = df_res['1 Anno (€)'].sum()
-            
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Valore Attuale Live", f"€ {tot_attuale:,.2f}")
-            c2.metric("P&L Totale Reale", f"€ {tot_pl:,.2f}")
-            c3.metric("Oggi (1G)", f"€ {tot_pl_1d:,.0f}")
-            c4.metric("1 Mese", f"€ {tot_pl_1m:,.0f}")
-            c5.metric("1 Anno", f"€ {tot_pl_1y:,.0f}")
+    df_posizioni['Valore Mercato (€)'] = valori_mercato
+    df_posizioni['P&L Latente (€)'] = pl_latenti
+    
+    # --- INTERRUTTORI P&L ---
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ Impostazioni Rendimento")
+    includi_dividendi = st.sidebar.checkbox("💰 Includi Dividendi", value=True)
+    sottrai_commissioni = st.sidebar.checkbox("📉 Sottrai Commissioni", value=True)
+    
+    df_posizioni['P&L Netto Totale (€)'] = df_posizioni['P&L Latente (€)'] + df_posizioni['P&L Realizzato Storico (€)']
+    
+    if includi_dividendi:
+        df_posizioni['P&L Netto Totale (€)'] += df_posizioni['Dividendi Incassati (€)']
+    if sottrai_commissioni:
+        df_posizioni['P&L Netto Totale (€)'] -= df_posizioni['Commissioni Totali (€)']
 
-            st.markdown("---")
-            
-            # Grafico a barre per le performance di breve periodo
-            st.markdown("#### 📊 Andamento Ultimi 30 Giorni (Top & Flop)")
-            top_1m = df_res.sort_values(by='1 Mese (€)', ascending=False).head(10)
-            fig_bar = px.bar(top_1m, x='1 Mese (€)', y='Titolo', orientation='h', color='1 Mese (€)', color_continuous_scale='Greens')
-            st.plotly_chart(fig_bar, width='stretch')
+    # --- DIVISIONE PORTAFOGLI ---
+    # Posizioni Aperte: Quantità > 0
+    df_aperte = df_posizioni[df_posizioni['Quantita Attuale'] > 0.0001].copy()
+    
+    # Posizioni Chiuse: Quantità = 0 ma con P&L, Commissioni o Dividendi > 0
+    df_chiuse = df_posizioni[(df_posizioni['Quantita Attuale'] <= 0.0001) & 
+                             ((abs(df_posizioni['P&L Netto Totale (€)']) > 0.01) | 
+                              (df_posizioni['Dividendi Incassati (€)'] > 0))].copy()
 
-            st.markdown("#### 📋 Tabella Dettagliata (Storico Temporale)")
-            
-            # Formattazione avanzata con gradiente di colore
-            cols_to_color = ['P&L Totale (€)', '1 Giorno (€)', '5 Giorni (€)', '1 Mese (€)', '3 Mesi (€)', '6 Mesi (€)', '1 Anno (€)', '5 Anni (€)']
-            
-            st.dataframe(df_res.style.format({
-                'Valore Carico (€)': '€ {:,.2f}',
-                'Valore Attuale (€)': '€ {:,.2f}',
-                'P&L Totale (€)': '€ {:,.2f}',
-                '1 Giorno (€)': '€ {:,.0f}',
-                '5 Giorni (€)': '€ {:,.0f}',
-                '1 Mese (€)': '€ {:,.0f}',
-                '3 Mesi (€)': '€ {:,.0f}',
-                '6 Mesi (€)': '€ {:,.0f}',
-                '1 Anno (€)': '€ {:,.0f}',
-                '5 Anni (€)': '€ {:,.0f}'
-            }).background_gradient(subset=cols_to_color, cmap='RdYlGn', vmin=-1000, vmax=1000), width='stretch')
-            
-            # Opzione per resettare
-            if st.sidebar.button("🗑️ Elimina Portafoglio Memorizzato"):
-                os.remove(BASELINE_FILE)
-                st.rerun()
+    # --- 5. DASHBOARD GLOBALE ---
+    tot_mercato = df_aperte['Valore Mercato (€)'].sum()
+    tot_pl_latente = df_aperte['P&L Latente (€)'].sum()
+    tot_pl_realizzato = df_posizioni['P&L Realizzato Storico (€)'].sum() # Globale (Aperte + Chiuse)
+    tot_dividendi = df_posizioni['Dividendi Incassati (€)'].sum() # Globale
+    tot_netto_globale = df_posizioni['P&L Netto Totale (€)'].sum()
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Asset (Solo Posizioni Aperte)", f"€ {tot_mercato:,.2f}")
+    c2.metric("P&L Latente (Aperte)", f"€ {tot_pl_latente:,.2f}")
+    c3.metric("P&L Realizzato (Aperte + Chiuse)", f"€ {tot_pl_realizzato:,.2f}")
+    c4.metric("Dividendi (Aperte + Chiuse)", f"€ {tot_dividendi:,.2f}")
+    
+    st.markdown("---")
+    st.markdown(f"### 🏆 P&L NETTO GLOBALE STORICO: **€ {tot_netto_globale:,.2f}**")
+    st.caption("Il vero profitto assoluto dal 2018: include le posizioni correnti e tutte le operazioni del passato.")
+    
+    # --- TABELLE SEPARATE (TABS) ---
+    tab1, tab2 = st.tabs(["🟢 POSIZIONI APERTE (Attuali)", "🏁 POSIZIONI CHIUSE (Storico)"])
+    
+    with tab1:
+        st.markdown("#### Portafoglio Attivo")
+        col_view_aperte = ['Titolo', 'ISIN', 'Quantita Attuale', 'Valore di Carico (€)', 'Valore Mercato (€)', 
+                           'P&L Latente (€)', 'P&L Realizzato Storico (€)', 'Dividendi Incassati (€)', 'P&L Netto Totale (€)']
+        
+        st.dataframe(df_aperte[col_view_aperte].style.format({
+            'Quantita Attuale': '{:,.2f}',
+            'Valore di Carico (€)': '€ {:,.2f}',
+            'Valore Mercato (€)': '€ {:,.2f}',
+            'P&L Latente (€)': '€ {:,.2f}',
+            'P&L Realizzato Storico (€)': '€ {:,.2f}',
+            'Dividendi Incassati (€)': '€ {:,.2f}',
+            'P&L Netto Totale (€)': '€ {:,.2f}'
+        }).background_gradient(subset=['P&L Netto Totale (€)', 'P&L Latente (€)', 'P&L Realizzato Storico (€)'], 
+                               cmap='RdYlGn', vmin=-1000, vmax=1000), width='stretch')
+
+    with tab2:
+        st.markdown(f"#### Cimitero degli Investimenti (Contributo Totale: **€ {df_chiuse['P&L Netto Totale (€)'].sum():,.2f}**)")
+        # Per le posizioni chiuse, non serve mostrare Quantità, Valore di Carico o P&L Latente
+        col_view_chiuse = ['Titolo', 'ISIN', 'P&L Realizzato Storico (€)', 'Dividendi Incassati (€)', 'Commissioni Totali (€)', 'P&L Netto Totale (€)']
+        
+        st.dataframe(df_chiuse[col_view_chiuse].style.format({
+            'P&L Realizzato Storico (€)': '€ {:,.2f}',
+            'Dividendi Incassati (€)': '€ {:,.2f}',
+            'Commissioni Totali (€)': '€ {:,.2f}',
+            'P&L Netto Totale (€)': '€ {:,.2f}'
+        }).background_gradient(subset=['P&L Netto Totale (€)', 'P&L Realizzato Storico (€)'], 
+                               cmap='RdYlGn', vmin=-1000, vmax=1000), width='stretch')
 
 else:
-    st.info("👋 Benvenuto! Per iniziare, carica il file `portafoglio-1103.CSV` dalla barra di sinistra. I dati verranno memorizzati per le visite future.")
+    st.info("👈 Carica il file storico `transazioni.CSV` per avviare il motore contabile.")
