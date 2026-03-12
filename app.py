@@ -3,24 +3,27 @@ import pandas as pd
 import yfinance as yf
 import plotly.express as px
 import numpy as np
+import os
 
-st.set_page_config(page_title="Gestione Portafoglio Attiva", layout="wide", page_icon="💼")
+st.set_page_config(page_title="Gestione Portafoglio Avanzata", layout="wide", page_icon="📈")
 
 # --- 1. FUNZIONI DI SUPPORTO E MAPPING ---
 def map_ticker(row):
-    """Mappa i codici del CSV a Yahoo Finance (correzioni applicate)"""
+    """Mappa i codici del CSV a Yahoo Finance"""
     sym = str(row['Simbolo']).strip()
     if pd.isna(sym) or sym == 'nan': return None
     
     overrides = {
         'MGT.MI': 'MGT.PA', 'OR.EQ': 'OR.PA', 'AHLA.EQ': 'AHLA.F', 'LCOP.MI': 'LCOP.L',
-        'EMOVE.MI': 'ECAR.L', 'EURO.MI': 'SMEU.MI', 'HSTE.MI': '3033.HK', 'CHINA.MI': 'CC1.PA',
+        'EMOVE.MI': 'ECAR.L', 'EURO.MI': 'SMEU.DE', 'HSTE.MI': '3033.HK', 'CHINA.MI': 'CC1.PA',
         '1EL.MI': 'EL.PA', '1ITX.MI': 'ITX.MC', 'BRK/B.N': 'BRK-B', 'OXY/WS.N': 'OXY',
-        'REMX.MI': 'VVMX.DE', 'DAPP.MI': 'DAPP.DE', '1NVDA.MI': 'NVDA', '1MU.MI': 'MU',
+        'REMX.MI': 'VVMX.DE', 'DAPP.MI': 'DAPP', '1NVDA.MI': 'NVDA', '1MU.MI': 'MU',
         '1GOOGL.MI': 'GOOGL', '1CALM.MI': 'CALM', '1AVGO.MI': 'AVGO', '1FDS.MI': 'FDS',
         'PHPD.MI': 'PHPD.MI', 'VBTC.FRA': 'VBTC.DE', 'VS0L.FRA': 'VS0L.DE', '2BTC.FRA':'2BTC.DE',
         'WETH.FRA': 'WETH.DE', 'VETH.FRA': 'VETH.DE', 'NOV.FRA':'NOV.F', '4COP.FRA':'4COP.DE',
-        'GBSE.MI':'GBSE.MI', 'RACE.MI':'RACE.MI', 'CE.MI':'CE.MI', 'OXY.N': 'OXY', 'TSM.N': 'TSM'
+        'GBSE.MI':'GBSE.MI', 'RACE.MI':'RACE.MI', 'CE.MI':'CE.MI', 'OXY.N': 'OXY', 'TSM.N': 'TSM',
+        'RARE.MI': 'RARE.L', 'AAPL.O': 'AAPL', 'WFC.N': 'WFC', 'FLNC.O': 'FLNC', 'SEI.N': 'SEI',
+        'CWEN.N': 'CWEN', 'IBM.N': 'IBM', 'DLO.O': 'DLO', 'SNDK.O': 'SNDK', 'BEPC.N': 'BEPC', 'INR.N': 'INR'
     }
     if sym in overrides: return overrides[sym]
     
@@ -34,13 +37,13 @@ def map_ticker(row):
     return sym
 
 def pulisci_dati(df):
-    """Estrae i valori ESATTI dal CSV per usarli come base sicura"""
+    """Pulisce il CSV ed estrae i valori esatti calcolati dalla Banca"""
     cols = df.columns.tolist()
     new_cols = []
     for c in cols:
         if 'Quantit' in c: new_cols.append('Quantita')
-        elif 'P.zo medio di carico' in c: new_cols.append('Prezzo_Carico')
-        elif 'Valore di carico' in c: new_cols.append('Valore_Carico')
+        elif 'P.zo medio di carico' in c: new_cols.append('Prezzo_Carico_CSV')
+        elif 'Valore di carico' in c: new_cols.append('Valore_Carico_CSV')
         elif 'P.zo di mercato' in c: new_cols.append('Prezzo_Mercato_CSV')
         elif 'Valore di mercato' in c: new_cols.append('Valore_Mercato_CSV')
         elif 'Var%' in c: new_cols.append('Var_Perc_CSV')
@@ -54,202 +57,171 @@ def pulisci_dati(df):
         try: return float(str(val).replace('.', '').replace(',', '.'))
         except: return 0.0
 
-    num_cols = ['Quantita', 'Prezzo_Carico', 'Valore_Carico', 'Prezzo_Mercato_CSV', 'Valore_Mercato_CSV', 'Var_EUR_CSV']
+    num_cols = ['Quantita', 'Prezzo_Carico_CSV', 'Valore_Carico_CSV', 'Prezzo_Mercato_CSV', 'Valore_Mercato_CSV', 'Var_EUR_CSV']
     for col in num_cols:
         if col in df.columns:
             df[col] = df[col].apply(to_float)
             
     return df[df['Quantita'] > 0].copy()
 
-# --- 2. GESTIONE STATO (LIQUIDITÀ E TRANSAZIONI) ---
-if 'liquidita' not in st.session_state:
-    st.session_state.liquidita = 0.0
-if 'transazioni' not in st.session_state:
-    st.session_state.transazioni = pd.DataFrame(columns=['Data', 'Ticker', 'Tipo', 'Quantita', 'Prezzo', 'Controvalore'])
+# Caching dello storico per evitare i blocchi di Yahoo
+@st.cache_data(ttl=3600)
+def fetch_historical_data(tickers):
+    hist_data = yf.download(tickers, period="5y", group_by='ticker')
+    fx_data = yf.download("EUR=X", period="1d")['Close']
+    fx_usd = float(fx_data.iloc[-1, 0]) if isinstance(fx_data, pd.DataFrame) else float(fx_data.iloc[-1])
+    return hist_data, fx_usd
 
-# --- 3. INTERFACCIA PRINCIPALE ---
-st.title("💼 Portafoglio Live & Gestione Liquidità")
-st.markdown("Baseline basata sui dati bancari (CSV) con Live Feed per tracking futuro e registrazione transazioni.")
+# --- 2. GESTIONE DELLA MEMORIA (BASELINE) ---
+BASELINE_FILE = "baseline_portfolio.csv"
 
-# SIDEBAR: Gestione Liquidità e Nuove Transazioni
+# Sidebar per il caricamento
 with st.sidebar:
-    st.header("🏦 Gestione Cassa")
-    nuova_cassa = st.number_input("Aggiungi/Preleva Fondi (€)", step=100.0, format="%.2f")
-    if st.button("Aggiorna Liquidità"):
-        st.session_state.liquidita += nuova_cassa
-        st.success(f"Liquidità aggiornata! Nuovo saldo: € {st.session_state.liquidita:,.2f}")
+    st.header("📂 Gestione Dati")
+    uploaded_file = st.file_uploader("Carica il Portafoglio (CSV della Banca)", type=['csv'])
     
-    st.metric("Liquidità Disponibile", f"€ {st.session_state.liquidita:,.2f}")
+    if uploaded_file is not None:
+        raw_df = pd.read_csv(uploaded_file, sep=';', encoding='latin1')
+        df_clean = pulisci_dati(raw_df)
+        df_clean['Yahoo_Ticker'] = df_clean.apply(map_ticker, axis=1)
+        # Salva la baseline in memoria locale!
+        df_clean.to_csv(BASELINE_FILE, index=False)
+        st.success("✅ Portafoglio memorizzato con successo come nuova Base!")
+
+# Carica i dati dalla memoria se esistono
+if os.path.exists(BASELINE_FILE):
+    df = pd.read_csv(BASELINE_FILE)
     
-    st.markdown("---")
-    st.header("🔄 Registra Transazione")
-    with st.form("form_transazione", clear_on_submit=True):
-        t_ticker = st.text_input("Ticker (es. NVDA, CE.MI)")
-        t_tipo = st.selectbox("Operazione", ["Acquisto", "Vendita"])
-        t_qty = st.number_input("Quantità", min_value=0.01, step=1.0)
-        t_prezzo = st.number_input("Prezzo Eseguito (in €)", min_value=0.01, step=1.0)
-        submit_btn = st.form_submit_button("Registra Eseguito")
-        
-        if submit_btn and t_ticker:
-            controvalore = t_qty * t_prezzo
-            if t_tipo == "Acquisto" and controvalore > st.session_state.liquidita:
-                st.error("Liquidità insufficiente!")
-            else:
-                nuova_tx = pd.DataFrame([{
-                    'Data': pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
-                    'Ticker': t_ticker.upper(),
-                    'Tipo': t_tipo,
-                    'Quantita': t_qty,
-                    'Prezzo': t_prezzo,
-                    'Controvalore': controvalore
-                }])
-                st.session_state.transazioni = pd.concat([st.session_state.transazioni, nuova_tx], ignore_index=True)
-                
-                # Aggiorna cassa
-                if t_tipo == "Acquisto":
-                    st.session_state.liquidita -= controvalore
-                else:
-                    st.session_state.liquidita += controvalore
-                st.rerun()
-
-uploaded_file = st.file_uploader("Carica il Portafoglio (portafoglio-1103.CSV)", type=['csv'])
-
-if uploaded_file is not None:
-    # Lettura e mappatura
-    raw_df = pd.read_csv(uploaded_file, sep=';', encoding='latin1')
-    df = pulisci_dati(raw_df)
-    df['Yahoo_Ticker'] = df.apply(map_ticker, axis=1)
+    st.title("💼 Dashboard Portafoglio (Storico & Live)")
     
-    # Integrazione delle transazioni recenti (aggiorna le quantità del CSV)
-    tx_df = st.session_state.transazioni
-    if not tx_df.empty:
-        for _, tx in tx_df.iterrows():
-            if tx['Ticker'] in df['Yahoo_Ticker'].values:
-                idx = df[df['Yahoo_Ticker'] == tx['Ticker']].index[0]
-                if tx['Tipo'] == "Acquisto":
-                    df.at[idx, 'Quantita'] += tx['Quantita']
-                    # Aggiorna valore di carico bancario sommandolo al nuovo acquisto
-                    df.at[idx, 'Valore_Carico'] += tx['Controvalore']
-                elif tx['Tipo'] == "Vendita":
-                    df.at[idx, 'Quantita'] = max(0, df.at[idx, 'Quantita'] - tx['Quantita'])
-            else:
-                # Se è un titolo nuovo, lo aggiungiamo fittiziamente al dataframe (semplificato)
-                pass 
-
     tickers = df['Yahoo_Ticker'].dropna().unique().tolist()
 
-    with st.spinner("Scaricamento prezzi aggiornati (Live Feed) da Yahoo Finance..."):
-        # Scarichiamo SOLO l'ultimo prezzo disponibile, non lo storico
-        live_data = yf.download(tickers, period="1d", group_by='ticker')
-        
-        fx_data = yf.download("EUR=X", period="1d")['Close']
-        fx_usd = float(fx_data.iloc[-1, 0]) if isinstance(fx_data, pd.DataFrame) else float(fx_data.iloc[-1])
-            
-    results = []
-    
-    # Valori Totali Originali della Banca (Fotografia)
-    tot_valore_banca = df['Valore_Mercato_CSV'].sum()
-    tot_pl_banca = df['Var_EUR_CSV'].sum()
-    
-    for _, row in df.iterrows():
-        t = row['Yahoo_Ticker']
-        qty = float(row['Quantita'])
-        if qty == 0 or pd.isna(t) or t not in live_data: continue
-        
+    with st.spinner("Scaricamento storico completo (5 Anni) da Yahoo Finance..."):
         try:
-            # Prezzo Live da Yahoo
-            if len(tickers) == 1:
-                p_now = float(np.atleast_1d(live_data['Close'].iloc[-1])[0])
-            else:
-                p_now = float(np.atleast_1d(live_data[t]['Close'].iloc[-1])[0])
-            
-            # Gestione Valuta
-            is_eur = any(x in t for x in ['.MI', '.F', '.DE', '.PA', '.MC', '.AS'])
-            fx_multiplier = 1.0 if is_eur else (1 / fx_usd)
-            
-            # Calcoli LIVE
-            valore_eur_live = qty * p_now * fx_multiplier
-            
-            # Valori Originali CSV
-            valore_eur_csv = float(row.get('Valore_Mercato_CSV', 0.0))
-            pl_eur_csv = float(row.get('Var_EUR_CSV', 0.0))
-            
-            # PERFORMANCE FUTURA (Delta dal momento dell'esportazione CSV)
-            delta_futuro = valore_eur_live - valore_eur_csv
-            
-            # P&L Totale Aggiornato = P&L Banca Originale + Movimento Live Recente
-            pl_totale_aggiornato = pl_eur_csv + delta_futuro
-            
-            results.append({
-                'Titolo': row['Titolo'],
-                'Mercato': row['Mercato'],
-                'Valore Banca Originale (€)': valore_eur_csv,
-                'P&L Banca Storico (€)': pl_eur_csv,
-                'Prezzo Live': p_now,
-                'Valore Attuale Live (€)': valore_eur_live,
-                'Delta Recente (Futuro) (€)': delta_futuro,
-                'P&L Totale Live (€)': pl_totale_aggiornato
-            })
+            hist_data, fx_usd = fetch_historical_data(tickers)
+            api_success = True
         except Exception as e:
-            continue
-            
-    df_res = pd.DataFrame(results)
-    
-    if not df_res.empty:
-        st.markdown("### 📊 Cruscotto di Portafoglio")
-        
-        totale_investito = tot_valore_banca - tot_pl_banca
-        tot_valore_live = df_res['Valore Attuale Live (€)'].sum()
-        tot_pl_live = df_res['P&L Totale Live (€)'].sum()
-        delta_complessivo = df_res['Delta Recente (Futuro) (€)'].sum()
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Valore Asset Live", f"€ {tot_valore_live:,.2f}", f"{delta_complessivo:,.2f} dal CSV")
-        c2.metric("Liquidità in Cassa", f"€ {st.session_state.liquidita:,.2f}")
-        c3.metric("P&L Totale (Live + Storico)", f"€ {tot_pl_live:,.2f}")
-        c4.metric("Patrimonio Complessivo", f"€ {(tot_valore_live + st.session_state.liquidita):,.2f}")
+            st.error("Errore di connessione a Yahoo Finance. Riprova tra poco.")
+            api_success = False
 
-        st.markdown("---")
+    if api_success:
+        results = []
         
-        col_grafici1, col_grafici2 = st.columns(2)
+        # Totali esatti derivanti dal file della Banca (Il tuo punto zero)
+        tot_valore_carico_banca = df['Valore_Carico_CSV'].sum()
         
-        with col_grafici1:
-            st.markdown("#### 🚀 Migliori Trend Recenti (Dal caricamento file)")
-            top_recenti = df_res.sort_values(by='Delta Recente (Futuro) (€)', ascending=False).head(8)
-            fig1 = px.bar(top_recenti, x='Delta Recente (Futuro) (€)', y='Titolo', orientation='h',
-                          color='Delta Recente (Futuro) (€)', color_continuous_scale='Greens')
-            fig1.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
-            st.plotly_chart(fig1, use_container_width=True)
+        for _, row in df.iterrows():
+            t = row['Yahoo_Ticker']
+            qty = float(row['Quantita'])
+            valore_carico_asset = float(row.get('Valore_Carico_CSV', 0.0))
+            valore_mercato_csv = float(row.get('Valore_Mercato_CSV', 0.0))
             
-        with col_grafici2:
-            st.markdown("#### 🗺️ Asset Allocation Totale (Asset + Cassa)")
-            # Prepariamo i dati inclusa la liquidità per il grafico a torta
-            alloc_df = pd.DataFrame({
-                'Asset': ['Portafoglio Titoli', 'Liquidità'],
-                'Valore': [tot_valore_live, st.session_state.liquidita]
-            })
-            fig_pie = px.pie(alloc_df, values='Valore', names='Asset', hole=0.4, color_discrete_sequence=['#1f77b4', '#2ca02c'])
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        st.markdown("#### 📋 Tabella Dettaglio Posizioni (Ibrida CSV / Live)")
+            if pd.isna(t) or qty == 0: continue
+            
+            try:
+                # Estrazione serie storica per il ticker
+                if len(tickers) == 1:
+                    t_hist = hist_data['Close'].dropna()
+                else:
+                    if t not in hist_data.columns.levels[0]: continue
+                    t_hist = hist_data[t]['Close'].dropna()
+                    
+                if t_hist.empty: continue
+                
+                # Prezzi nei vari intervalli temporali
+                p_now = float(np.atleast_1d(t_hist.iloc[-1])[0])
+                p_1d  = float(np.atleast_1d(t_hist.iloc[-2] if len(t_hist) > 2 else t_hist.iloc[0])[0])
+                p_5d  = float(np.atleast_1d(t_hist.iloc[-6] if len(t_hist) > 6 else t_hist.iloc[0])[0])
+                p_1m  = float(np.atleast_1d(t_hist.iloc[-22] if len(t_hist) > 22 else t_hist.iloc[0])[0])
+                p_3m  = float(np.atleast_1d(t_hist.iloc[-64] if len(t_hist) > 64 else t_hist.iloc[0])[0])
+                p_6m  = float(np.atleast_1d(t_hist.iloc[-126] if len(t_hist) > 126 else t_hist.iloc[0])[0])
+                p_1y  = float(np.atleast_1d(t_hist.iloc[-252] if len(t_hist) > 252 else t_hist.iloc[0])[0])
+                p_5y  = float(np.atleast_1d(t_hist.iloc[0])[0])
+                
+                # Conversione Valuta (Semplificata: converte in EUR se è un mercato extra-UE)
+                is_eur = any(x in t for x in ['.MI', '.F', '.DE', '.PA', '.MC', '.AS'])
+                fx = 1.0 if is_eur else (1 / fx_usd)
+                
+                # Valore Attuale Calcolato
+                valore_attuale_live = qty * p_now * fx
+                
+                # Variazioni su base storica (P&L per periodi)
+                pl_1d = qty * (p_now - p_1d) * fx
+                pl_5d = qty * (p_now - p_5d) * fx
+                pl_1m = qty * (p_now - p_1m) * fx
+                pl_3m = qty * (p_now - p_3m) * fx
+                pl_6m = qty * (p_now - p_6m) * fx
+                pl_1y = qty * (p_now - p_1y) * fx
+                pl_5y = qty * (p_now - p_5y) * fx
+                
+                # P&L TOTALE ESATTO = Valore Attuale Live - Valore di Carico originale della Banca!
+                pl_totale = valore_attuale_live - valore_carico_asset
+                
+                results.append({
+                    'Titolo': row['Titolo'],
+                    'Ticker': t,
+                    'Valore Carico (€)': valore_carico_asset,
+                    'Valore Attuale (€)': valore_attuale_live,
+                    'P&L Totale (€)': pl_totale,
+                    '1 Giorno (€)': pl_1d,
+                    '5 Giorni (€)': pl_5d,
+                    '1 Mese (€)': pl_1m,
+                    '3 Mesi (€)': pl_3m,
+                    '6 Mesi (€)': pl_6m,
+                    '1 Anno (€)': pl_1y,
+                    '5 Anni (€)': pl_5y,
+                })
+            except Exception as e:
+                continue
+                
+        df_res = pd.DataFrame(results)
         
-        cols_da_mostrare = ['Titolo', 'Valore Banca Originale (€)', 'P&L Banca Storico (€)', 
-                            'Prezzo Live', 'Valore Attuale Live (€)', 'Delta Recente (Futuro) (€)', 'P&L Totale Live (€)']
-                            
-        st.dataframe(df_res[cols_da_mostrare].style.format({
-            'Valore Banca Originale (€)': '€ {:,.2f}',
-            'P&L Banca Storico (€)': '€ {:,.2f}',
-            'Prezzo Live': '{:,.2f}',
-            'Valore Attuale Live (€)': '€ {:,.2f}',
-            'Delta Recente (Futuro) (€)': '€ {:,.2f}',
-            'P&L Totale Live (€)': '€ {:,.2f}'
-        }).background_gradient(subset=['P&L Banca Storico (€)', 'Delta Recente (Futuro) (€)', 'P&L Totale Live (€)'], 
-                               cmap='RdYlGn', vmin=-500, vmax=500), use_container_width=True)
-                               
-        # Storico transazioni
-        if not st.session_state.transazioni.empty:
-            st.markdown("#### 🧾 Registro Transazioni Effettuate")
-            st.dataframe(st.session_state.transazioni, use_container_width=True)
+        if not df_res.empty:
+            st.markdown("### 🎯 KPI di Portafoglio")
+            
+            tot_attuale = df_res['Valore Attuale (€)'].sum()
+            tot_pl = df_res['P&L Totale (€)'].sum()
+            tot_pl_1d = df_res['1 Giorno (€)'].sum()
+            tot_pl_1m = df_res['1 Mese (€)'].sum()
+            tot_pl_1y = df_res['1 Anno (€)'].sum()
+            
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Valore Attuale Live", f"€ {tot_attuale:,.2f}")
+            c2.metric("P&L Totale Reale", f"€ {tot_pl:,.2f}")
+            c3.metric("Oggi (1G)", f"€ {tot_pl_1d:,.0f}")
+            c4.metric("1 Mese", f"€ {tot_pl_1m:,.0f}")
+            c5.metric("1 Anno", f"€ {tot_pl_1y:,.0f}")
+
+            st.markdown("---")
+            
+            # Grafico a barre per le performance di breve periodo
+            st.markdown("#### 📊 Andamento Ultimi 30 Giorni (Top & Flop)")
+            top_1m = df_res.sort_values(by='1 Mese (€)', ascending=False).head(10)
+            fig_bar = px.bar(top_1m, x='1 Mese (€)', y='Titolo', orientation='h', color='1 Mese (€)', color_continuous_scale='Greens')
+            st.plotly_chart(fig_bar, width='stretch')
+
+            st.markdown("#### 📋 Tabella Dettagliata (Storico Temporale)")
+            
+            # Formattazione avanzata con gradiente di colore
+            cols_to_color = ['P&L Totale (€)', '1 Giorno (€)', '5 Giorni (€)', '1 Mese (€)', '3 Mesi (€)', '6 Mesi (€)', '1 Anno (€)', '5 Anni (€)']
+            
+            st.dataframe(df_res.style.format({
+                'Valore Carico (€)': '€ {:,.2f}',
+                'Valore Attuale (€)': '€ {:,.2f}',
+                'P&L Totale (€)': '€ {:,.2f}',
+                '1 Giorno (€)': '€ {:,.0f}',
+                '5 Giorni (€)': '€ {:,.0f}',
+                '1 Mese (€)': '€ {:,.0f}',
+                '3 Mesi (€)': '€ {:,.0f}',
+                '6 Mesi (€)': '€ {:,.0f}',
+                '1 Anno (€)': '€ {:,.0f}',
+                '5 Anni (€)': '€ {:,.0f}'
+            }).background_gradient(subset=cols_to_color, cmap='RdYlGn', vmin=-1000, vmax=1000), width='stretch')
+            
+            # Opzione per resettare
+            if st.sidebar.button("🗑️ Elimina Portafoglio Memorizzato"):
+                os.remove(BASELINE_FILE)
+                st.rerun()
 
 else:
-    st.info("👈 Carica il file `portafoglio.csv` dalla barra di sinistra per generare la dashboard.")
+    st.info("👋 Benvenuto! Per iniziare, carica il file `portafoglio-1103.CSV` dalla barra di sinistra. I dati verranno memorizzati per le visite future.")
